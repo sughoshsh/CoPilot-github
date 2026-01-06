@@ -3,7 +3,6 @@ import requests
 import subprocess
 import shlex
 import json
-from typing import Optional
 
 # Simple Streamlit + Ollama demo chatbot
 # Requirements:
@@ -52,10 +51,42 @@ def call_ollama_http(prompt: str, model: str = "llama2", max_tokens: int = 512, 
                 first = data["choices"][0]
                 if isinstance(first, dict) and "text" in first:
                     return first["text"]
+            # sometimes Ollama returns a single object with a 'response' field
+            if isinstance(data, dict) and "response" in data:
+                return data["response"]
             # fallback to raw text
             return r.text
         except ValueError:
-            return r.text
+            # Response may be a stream / NDJSON (multiple JSON objects concatenated).
+            text = r.text
+            try:
+                import re
+                parts = re.split(r'}\s*{', text)
+                if len(parts) > 1:
+                    objs = []
+                    for i, p in enumerate(parts):
+                        if i > 0:
+                            p = '{' + p
+                        if i < len(parts) - 1:
+                            p = p + '}'
+                        try:
+                            objs.append(json.loads(p))
+                        except Exception:
+                            # skip parts that don't parse
+                            continue
+                    pieces = []
+                    for o in objs:
+                        if isinstance(o, dict):
+                            # Ollama streaming chunks commonly use 'response'
+                            for key in ("response", "text", "output", "content"):
+                                if key in o and isinstance(o[key], str):
+                                    pieces.append(o[key])
+                                    break
+                    if pieces:
+                        return ''.join(pieces)
+            except Exception:
+                pass
+            return text
     except Exception as exc:
         raise RuntimeError(f"HTTP call to Ollama failed: {exc}")
 
@@ -90,38 +121,20 @@ def generate_response(prompt: str, model: str, max_tokens: int, temperature: flo
             return f"Error generating response: {exc}\n\nMake sure Ollama is running (HTTP API) or ollama CLI is installed and a model is available.\nSee: https://ollama.ai/"
 
 
-# Optional: lightweight LangChain wrapper (only activated if langchain is installed)
-try:
-    from langchain.llms.base import LLM
-    from langchain.schema import LLMResult
-
-    class OllamaLangChain(LLM):
-        """A tiny LangChain LLM wrapper that calls Ollama via the helper above."""
-        model: str = "llama2"
-        max_tokens: int = 512
-        temperature: float = 0.7
-
-        def _call(self, prompt: str, stop: Optional[list] = None) -> str:
-            return generate_response(prompt, model=self.model, max_tokens=self.max_tokens, temperature=self.temperature)
-
-        @property
-        def _identifying_params(self):
-            return {"model": self.model, "max_tokens": self.max_tokens, "temperature": self.temperature}
-
-except Exception:
-    OllamaLangChain = None
+# LangChain integration removed for this simple demo; this script uses the
+# Ollama `llama2` model directly via HTTP or the CLI.
 
 
 # Streamlit UI
-st.set_page_config(page_title="Ollama + LangChain Chatbot", layout="wide")
-st.title("Ollama + LangChain Demo Chatbot (Streamlit)")
+st.set_page_config(page_title="Ollama Demo Chatbot", layout="wide")
+st.title("Ollama Demo Chatbot (Streamlit)")
 
 with st.sidebar:
     st.header("Settings")
-    model = st.text_input("Model name", value="llama2")
+    st.write("Select model (must be pulled locally)")
+    model = st.radio("Model", options=("llama2", "mistral"), index=0)
     max_tokens = st.slider("Max tokens", min_value=64, max_value=2048, value=512)
     temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7)
-    use_langchain = st.checkbox("Enable LangChain wrapper (if installed)", value=False)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []  # list of (role, text)
@@ -140,8 +153,7 @@ with col1:
 
 with col2:
     st.write("### Info")
-    st.write("This demo tries to call Ollama via HTTP at http://localhost:11434/api/generate.\nIf that fails it will try the `ollama` CLI on PATH.")
-    st.write("Optional LangChain wrapper will be available if langchain is installed.")
+    st.write(f"This demo calls the Ollama `{model}` model via HTTP at http://localhost:11434/api/generate.\nIf that fails it will try the `ollama` CLI on PATH.")
 
 if send and user_input:
     st.session_state.messages.append(("user", user_input))
@@ -155,14 +167,7 @@ if send and user_input:
         conversation += f"{role}: {text}\n"
     prompt = f"The following is a conversation between a helpful assistant and a user.\n{conversation}\nAssistant:" 
 
-    if use_langchain and OllamaLangChain is not None:
-        llm = OllamaLangChain(model=model, max_tokens=max_tokens, temperature=temperature)
-        try:
-            resp = llm._call(prompt)
-        except Exception as exc:
-            resp = f"LangChain wrapper error: {exc}"
-    else:
-        resp = generate_response(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
+    resp = generate_response(prompt, model=model, max_tokens=max_tokens, temperature=temperature)
 
     st.session_state.messages.append(("bot", resp))
     placeholder.empty()
@@ -172,4 +177,4 @@ if send and user_input:
 # Dependency summary printed at bottom
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Dependencies")
-st.sidebar.markdown("- streamlit\n- requests\n- optional: langchain\n- Ollama: either the Ollama local server (HTTP API) or the `ollama` CLI must be installed and a model pulled (see https://ollama.ai/)")
+st.sidebar.markdown("- streamlit\n- requests\n- Ollama: the Ollama local server (HTTP API) or the `ollama` CLI must be installed and the `llama2` model pulled (see https://ollama.ai/)")

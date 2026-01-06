@@ -1,0 +1,7 @@
+{
+    "python.testing.pytestArgs": [
+        "CoPilot-github"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
+}
